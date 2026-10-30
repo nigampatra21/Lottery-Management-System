@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Untitled Document.md</title>
+  
+</head>
+<body id="preview">
+<p class="has-line-data" data-line-start="0" data-line-end="2">🚀 Complete Kafka &amp; Audit-Service Integration Guide<br>
+This guide walks you through setting up Apache Kafka locally via Docker and wiring it into your Spring Boot audit-service with robust error handling and Dead-Letter Topic (DLT) support.</p>
+<p class="has-line-data" data-line-start="3" data-line-end="6">Part 1: Local Kafka Infrastructure (Docker)<br>
+Step 1: Start Docker Desktop<br>
+Open Docker Desktop from your Windows Start menu.</p>
+<p class="has-line-data" data-line-start="7" data-line-end="8">Accept any prompts (install/update WSL 2 if requested, and restart Windows if prompted).</p>
+<p class="has-line-data" data-line-start="9" data-line-end="10">Wait until the bottom-left corner of the window says Engine running (green).</p>
+<p class="has-line-data" data-line-start="11" data-line-end="13">Step 2: Verify Docker<br>
+Open PowerShell and run these commands one at a time:</p>
+<p class="has-line-data" data-line-start="14" data-line-end="19">PowerShell<br>
+docker --version<br>
+docker compose version<br>
+docker run hello-world<br>
+The first two should print version numbers.</p>
+<p class="has-line-data" data-line-start="20" data-line-end="21">The third should print Hello from Docker!.</p>
+<p class="has-line-data" data-line-start="22" data-line-end="24">Step 3: Create the Kafka Docker Compose File<br>
+In PowerShell, run:</p>
+<p class="has-line-data" data-line-start="25" data-line-end="30">PowerShell<br>
+mkdir C:\lottery-infra<br>
+cd C:\lottery-infra<br>
+notepad docker-compose.yml<br>
+Click Yes when Notepad asks to create a new file, and paste this exact configuration (ensure spaces are used for indentation, never Tabs):</p>
+<p class="has-line-data" data-line-start="31" data-line-end="40">YAML<br>
+services:<br>
+kafka:<br>
+image: apache/kafka:4.0.0<br>
+container_name: lottery-kafka<br>
+restart: unless-stopped<br>
+ports:<br>
+- “9092:9092”<br>
+Save with Ctrl + S and close Notepad.</p>
+<p class="has-line-data" data-line-start="41" data-line-end="43">Step 4: Start Kafka<br>
+Run the following command to start the container in the background:</p>
+<p class="has-line-data" data-line-start="44" data-line-end="47">PowerShell<br>
+docker compose up -d<br>
+Check that it is running:</p>
+<p class="has-line-data" data-line-start="48" data-line-end="52">PowerShell<br>
+docker compose ps<br>
+docker compose logs kafka<br>
+(Look near the end of the logs for a line stating that the Kafka server has started).</p>
+<p class="has-line-data" data-line-start="53" data-line-end="55">Step 5: Create the Required Topics<br>
+Run each command on a single line:</p>
+<p class="has-line-data" data-line-start="56" data-line-end="61">PowerShell<br>
+docker exec lottery-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --topic audit-events --partitions 3 --replication-factor 1<br>
+docker exec lottery-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --topic audit-events.DLT --partitions 1 --replication-factor 1<br>
+docker exec lottery-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list<br>
+Each create command should output Created topic …, and the list command should display both topics.</p>
+<p class="has-line-data" data-line-start="62" data-line-end="64">Step 6: Test Messaging (Two Terminals)<br>
+Window 1 (Reader):</p>
+<p class="has-line-data" data-line-start="65" data-line-end="68">PowerShell<br>
+docker exec -it lottery-kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic audit-events --from-beginning<br>
+Window 2 (Sender):</p>
+<p class="has-line-data" data-line-start="69" data-line-end="72">PowerShell<br>
+docker exec -it lottery-kafka /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server localhost:9092 --topic audit-events<br>
+Type hello and press Enter in Window 2. It should instantly appear in Window 1. Press Ctrl + C in both windows when done.</p>
+<p class="has-line-data" data-line-start="73" data-line-end="80">🛠️ Everyday Kafka Commands<br>
+What you want	Command (run in C:\lottery-infra)<br>
+Stop Kafka	docker compose stop<br>
+Start Kafka again	docker compose start<br>
+Check status	docker compose ps<br>
+Remove completely (deletes messages)	docker compose down<br>
+Note: Docker Desktop must be running whenever you use Kafka. After a reboot, open Docker Desktop first; restart: unless-stopped will handle the rest.</p>
+<p class="has-line-data" data-line-start="81" data-line-end="84">Part 2: Spring Boot audit-service Integration<br>
+Step 1: Add Dependency (pom.xml)<br>
+Ensure the Spring Kafka starter is inside your <dependencies> section (not <dependencyManagement>):</p>
+<p class="has-line-data" data-line-start="85" data-line-end="91">XML<br>
+<dependency><br>
+<groupId>org.springframework.boot</groupId><br>
+<artifactId>spring-boot-starter-kafka</artifactId><br>
+</dependency><br>
+After adding this, reload/sync your Maven project in IntelliJ.</p>
+<p class="has-line-data" data-line-start="92" data-line-end="100">Step 2: Configure Properties (application.properties)<br>
+Properties<br>
+spring.kafka.bootstrap-servers=localhost:9092<br>
+spring.kafka.consumer.group-id=audit-service<br>
+spring.kafka.consumer.auto-offset-reset=earliest<br>
+audit.kafka.topic=audit-events<br>
+Step 3: Create the Listener<br>
+Create com.lottery.audit.kafka.AuditEventListener.java:</p>
+<p class="has-line-data" data-line-start="101" data-line-end="103">Java<br>
+package com.lottery.audit.kafka;</p>
+<p class="has-line-data" data-line-start="104" data-line-end="113">import com.lottery.audit.dto.AuditEventRequest;<br>
+import com.lottery.audit.exception.DuplicateResourceException;<br>
+import com.lottery.audit.service.AuditService;<br>
+import org.slf4j.Logger;<br>
+import org.slf4j.LoggerFactory;<br>
+import org.springframework.kafka.annotation.KafkaListener;<br>
+import org.springframework.stereotype.Component;<br>
+import tools.jackson.databind.DeserializationFeature;<br>
+import tools.jackson.databind.json.JsonMapper;</p>
+<p class="has-line-data" data-line-start="114" data-line-end="116">@Component<br>
+public class AuditEventListener {</p>
+<pre class="has-line-data" data-line-start="117" data-line-end="149"><code>private static final Logger log = LoggerFactory.getLogger(AuditEventListener.class);
+
+private static final JsonMapper MAPPER = JsonMapper.builder()
+        .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
+        .build();
+
+private final AuditService auditService;
+
+public AuditEventListener(AuditService auditService) {
+    this.auditService = auditService;
+}
+
+@KafkaListener(topics = &quot;${audit.kafka.topic:audit-events}&quot;)
+public void onMessage(String payload) {
+    AuditEventRequest request = MAPPER.readValue(payload, AuditEventRequest.class);
+
+    if (isBlank(request.eventId()) || isBlank(request.serviceName())
+            || isBlank(request.action())) {
+        throw new IllegalArgumentException(
+                &quot;eventId, serviceName and action are required&quot;);
+    }
+
+    try {
+        auditService.record(request);
+    } catch (DuplicateResourceException e) {
+        log.debug(&quot;Audit event {} was already recorded&quot;, request.eventId());
+    }
+}
+
+private static boolean isBlank(String value) {
+    return value == null || value.isBlank();
+}
+</code></pre>
+<p class="has-line-data" data-line-start="149" data-line-end="152">}<br>
+Step 4: Configure Error Handling &amp; DLT<br>
+Create com.lottery.audit.kafka.KafkaErrorConfig.java:</p>
+<p class="has-line-data" data-line-start="153" data-line-end="155">Java<br>
+package com.lottery.audit.kafka;</p>
+<p class="has-line-data" data-line-start="156" data-line-end="163">import org.apache.kafka.common.TopicPartition;<br>
+import org.springframework.context.annotation.Bean;<br>
+import org.springframework.context.annotation.Configuration;<br>
+import org.springframework.kafka.core.KafkaTemplate;<br>
+import org.springframework.kafka.listener.DeadLetterPublishingRecoverer;<br>
+import org.springframework.kafka.listener.DefaultErrorHandler;<br>
+import org.springframework.util.backoff.FixedBackOff;</p>
+<p class="has-line-data" data-line-start="164" data-line-end="166">@Configuration<br>
+public class KafkaErrorConfig {</p>
+<pre class="has-line-data" data-line-start="167" data-line-end="178"><code>@Bean
+DefaultErrorHandler kafkaErrorHandler(KafkaTemplate&lt;String, String&gt; template) {
+    DeadLetterPublishingRecoverer recoverer = new DeadLetterPublishingRecoverer(template,
+            (record, ex) -&gt; new TopicPartition(record.topic() + &quot;.DLT&quot;, 0));
+    DefaultErrorHandler handler =
+            new DefaultErrorHandler(recoverer, new FixedBackOff(1000L, 3L));
+    
+    // Non-retryable exceptions go straight to DLT
+    handler.addNotRetryableExceptions(IllegalArgumentException.class);
+    return handler;
+}
+</code></pre>
+<p class="has-line-data" data-line-start="178" data-line-end="181">}<br>
+Part 3: Verification &amp; Smoke Testing<br>
+Start a producer in a terminal to paste test payloads:</p>
+<p class="has-line-data" data-line-start="182" data-line-end="185">PowerShell<br>
+docker exec -it lottery-kafka /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server localhost:9092 --topic audit-events<br>
+Test Matrix</p>
+<h1 class="code-line has-line-data" data-line-start="185" data-line-end="186"><a id="Payload_Action_Expected_Result_185"></a>Payload / Action	Expected Result</h1>
+<p class="has-line-data" data-line-start="186" data-line-end="192">1	{“eventId”:“EVT-KAFKA-0001”,“serviceName”:“kafka-test”,“userId”:1,“action”:“KAFKA_SMOKE_TEST”,“resourceType”:“TEST”,“resourceId”:“1”,“oldValue”:null,“newValue”:{“ok”:true},“ipAddress”:null,“correlationId”:“kafka-test-0001”}	Appears in database within seconds as EVT-KAFKA-0001.<br>
+2	Send Line 1 again	Duplicate is safely ignored; no errors thrown.<br>
+3	this is not json	Routes to audit-events.DLT after retries.<br>
+4	{“eventId”:“EVT-KAFKA-0002”,“serviceName”:“kafka-test”}	Straight to DLT (missing required fields, non-retryable).<br>
+5	Stop audit-service, send two new IDs (EVT-KAFKA-0003 &amp; 0004), then restart audit-service.	Both events are successfully processed upon startup (offline resilience).<br>
+To read messages in the dead-letter topic:</p>
+<p class="has-line-data" data-line-start="193" data-line-end="202">PowerShell<br>
+docker exec -it lottery-kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic audit-events.DLT --from-beginning<br>
+🔍 Troubleshooting Reference<br>
+Symptom	Likely Cause	Solution<br>
+No Kafka lines in logs	Starter not on classpath / Maven not reloaded.	Verify pom.xml and reload Maven.<br>
+Connection to node -1 failed	Kafka isn’t running or compose file down.	Check docker compose ps and start cluster.<br>
+JsonParseException in logs	Pasted line broke in terminal.	Copy and paste the JSON as a single continuous line.<br>
+DLT topics empty	DLT topic not created or error handler bean missing.	Re-run Step 5 topic creation commands.<br>
+Reply with “all as expected” or let me know the first row/step that gives you trouble, along with your audit-service base package name so we can align future steps!</p>
+
+</body>
+</html>

@@ -1,0 +1,93 @@
+Here is the whole thing from zero, one small step at a time. You only need Docker Desktop for now, and no Java or Spring code is involved until the last step. These steps are written for Windows, since that’s what you’ve been using.
+
+Step 1: Start Docker Desktop
+Open Docker Desktop from the Start menu.
+Accept any prompts. If it asks to install or update WSL 2, say yes. If it asks you to restart Windows, do that, then open Docker Desktop again.
+Wait until the bottom-left of the window says Engine running (green). Until then, nothing else works.
+Step 2: Check that Docker works
+
+Press the Windows key, type PowerShell, and open it. Run these one at a time:
+
+docker --version
+docker compose version
+docker run hello-world
+
+The first two should print version numbers. The third should print a message that starts with Hello from Docker!. That proves Docker can download and run things.
+
+If docker isn’t recognised, close PowerShell, open a new one, and retry. If it still fails, restart Windows.
+
+Step 3: Make a folder for Kafka
+
+In the same PowerShell window:
+
+mkdir C:\lottery-infra
+cd C:\lottery-infra
+notepad docker-compose.yml
+
+Notepad asks “Do you want to create a new file?” Click Yes. Paste this exactly:
+
+yaml
+services:
+  kafka:
+    image: apache/kafka:4.0.0
+    container_name: lottery-kafka
+    restart: unless-stopped
+    ports:
+      - "9092:9092"
+
+Two rules for this file:
+
+The indentation must use spaces, never the Tab key.
+Keep the file name exactly docker-compose.yml, with no .txt added.
+
+Save with Ctrl+S and close Notepad.
+
+What it says: run Kafka from the official image, call the container lottery-kafka, restart it automatically, and make it reachable from your computer at localhost:9092.
+
+Step 4: Start Kafka
+docker compose up -d
+
+The first time, Docker downloads the Kafka image, which takes a minute or two. Then check it:
+
+docker compose ps
+
+You should see lottery-kafka with the status Up or running. Then look at the log:
+
+docker compose logs kafka
+
+Look near the end for a line saying the Kafka server has started. If you see errors, copy the last 20 lines and send them to me.
+
+Step 5: Create the two topics
+
+A topic is a named channel that messages go through. We need two: one for audit events and one for failed ones. Run each command on a single line:
+
+docker exec lottery-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --topic audit-events --partitions 3 --replication-factor 1
+docker exec lottery-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --topic audit-events.DLT --partitions 1 --replication-factor 1
+docker exec lottery-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list
+
+Each create command should say Created topic .... The last command lists both names.
+
+Step 6: Send a test message
+
+You need two PowerShell windows. Open a second one now.
+
+Window 1: the reader (waits and prints whatever arrives):
+
+docker exec -it lottery-kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic audit-events --from-beginning
+
+Window 2: the sender:
+
+docker exec -it lottery-kafka /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server localhost:9092 --topic audit-events
+
+In Window 2, type hello and press Enter. A > prompt appears. Within a second, hello shows up in Window 1.
+
+That’s Kafka working. Stop both windows with Ctrl+C.
+
+Everyday use
+What you want	Command (run in C:\lottery-infra)
+Stop Kafka	docker compose stop
+Start it again	docker compose start
+See if it’s running	docker compose ps
+Remove it completely (deletes the messages)	docker compose down
+
+Docker Desktop must be running whenever you use Kafka. After a reboot, open Docker Desktop first. Thanks to restart: unless-stopped, the container then starts by itself.

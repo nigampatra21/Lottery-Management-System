@@ -1,0 +1,107 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lottery Ticket Payment</title>
+  <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      max-width: 420px;
+      margin: 40px auto;
+      padding: 20px;
+      background: #f4f6f9;
+    }
+    .card {
+      background: white;
+      padding: 24px;
+      border-radius: 16px;
+      box-shadow: 0 4px 18px #0001;
+    }
+    input, button {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 14px;
+      margin-top: 12px;
+      border-radius: 8px;
+      font-size: 16px;
+    }
+    input { border: 1px solid #ccc; }
+    button {
+      border: 0;
+      background: #1769e0;
+      color: white;
+      font-weight: bold;
+    }
+    pre {
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>Lottery Ticket Payment</h2>
+    <p>Amount: <strong>₹150.00</strong></p>
+
+    <label for="key">Razorpay Test Key ID</label>
+    <input id="key" placeholder="rzp_test_..." />
+
+    <label for="order">Razorpay Order ID</label>
+    <input id="order" value="order_TqGhHASqKqa9ty" />
+
+    <button onclick="payNow()">Pay ₹150</button>
+    <p id="message"></p>
+    <pre id="result"></pre>
+  </div>
+
+  <script>
+    function payNow() {
+      const key = document.getElementById("key").value.trim();
+      const orderId = document.getElementById("order").value.trim();
+      const message = document.getElementById("message");
+      const result = document.getElementById("result");
+
+      if (!key || !orderId) {
+        message.textContent = "Enter the test key ID and order ID.";
+        return;
+      }
+
+      const options = {
+        key: key,
+        amount: 15000,
+        currency: "INR",
+        name: "Lottery Management System",
+        description: "Lottery ticket payment",
+        order_id: orderId,
+        handler: function (response) {
+          message.textContent =
+            "Payment response received. Verify it with your backend.";
+          result.textContent = JSON.stringify({
+            razorpay_order_id: response.razorpay_order_id,
+            razorpay_payment_id: response.razorpay_payment_id,
+            razorpay_signature: response.razorpay_signature
+          }, null, 2);
+        },
+        modal: {
+          ondismiss: function () {
+            message.textContent = "Checkout closed. Payment may still need checking.";
+          }
+        },
+        theme: { color: "#1769e0" }
+      };
+
+      const checkout = new Razorpay(options);
+      checkout.on("payment.failed", function (response) {
+        message.textContent = "Payment failed: " +
+          (response.error.description || "Please try again.");
+        result.textContent = JSON.stringify(response.error, null, 2);
+      });
+      checkout.open();
+    }
+  </script>
+</body>
+</html>

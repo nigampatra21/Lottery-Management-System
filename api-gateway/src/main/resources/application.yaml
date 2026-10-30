@@ -1,0 +1,81 @@
+server:
+  port: 8080
+
+services:
+  auth: ${AUTH_SERVICE_URL:http://localhost:8081}
+  lottery: ${LOTTERY_SERVICE_URL:http://localhost:8082}
+  ticket: ${TICKET_SERVICE_URL:http://localhost:8083}
+  draw: ${DRAW_SERVICE_URL:http://localhost:8084}
+  winner: ${WINNER_SERVICE_URL:http://localhost:8085}
+  audit: ${AUDIT_SERVICE_URL:http://localhost:8086}
+
+spring:
+  application:
+    name: api-gateway
+  cloud:
+    gateway:
+      server:
+        webflux:
+          httpclient:
+            connect-timeout: 2000
+            response-timeout: 15s
+          default-filters:
+            # The internal key is for service-to-service calls only
+            - RemoveRequestHeader=X-Internal-Key
+          globalcors:
+            cors-configurations:
+              '[/**]':
+                allowed-origins:
+                  - http://localhost:5173
+                allowed-methods:
+                  - GET
+                  - POST
+                  - PUT
+                  - PATCH
+                  - DELETE
+                  - OPTIONS
+                allowed-headers:
+                  - Authorization
+                  - Content-Type
+                  - X-Correlation-Id
+                exposed-headers:
+                  - X-Correlation-Id
+                max-age: 3600
+          routes:
+            - id: auth
+              uri: ${services.auth}
+              predicates:
+                - Path=/api/auth/**
+
+            - id: lottery
+              uri: ${services.lottery}
+              predicates:
+                - Path=/api/lotteries/**,/api/lottery-rules/**
+
+            - id: ticket
+              uri: ${services.ticket}
+              predicates:
+                - Path=/api/tickets/**,/api/agent/**,/api/admin/tickets/**,/api/webhooks/razorpay
+
+            - id: draw
+              uri: ${services.draw}
+              predicates:
+                - Path=/api/draws/**
+
+            - id: winner
+              uri: ${services.winner}
+              predicates:
+                - Path=/api/winners/**,/api/claims/**
+
+            # Reads only. There is deliberately no route for POST /api/audit/events,
+            # so audit events can't be written from outside
+            - id: audit-read
+              uri: ${services.audit}
+              predicates:
+                - Path=/api/audit/**
+                - Method=GET,OPTIONS
+
+
+logging:
+  level:
+    org.springframework.cloud.gateway: INFO
