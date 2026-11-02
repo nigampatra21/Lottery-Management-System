@@ -1,0 +1,345 @@
+Deployment will run in stages, so each part can be checked before the next. This message covers stage 1: the whole backend in Docker: MySQL, Kafka, the six services and the gateway, started with one command. Stage 2 adds the frontend container, one public address with HTTPS, and moving it to a server. I can’t run Docker from here, so the test table at the end is how we check it.
+
+The Java images follow the tag pattern <java-version>-<jre or jdk>. For example eclipse-temurin:25-jre is the runtime-only Java 25 image. Use the Java version your pom.xml files declare. 
+adoptium
+
+What you end up with
+LMS\
+  docker-compose.yml
+  .env                          (secrets, never committed)
+  deploy\db\init\               (database setup scripts)
+  auth-service\Dockerfile
+  lottery-service\Dockerfile    (the same file in every service folder)
+  ...
+
+Only the gateway (port 8080) is reachable from outside. MySQL, Kafka and the services stay on Docker’s private network, so a mistake in one of them isn’t exposed. Services reach Kafka at kafka:19092 over that network, which also avoids the Windows port-forwarding trouble you had earlier.
+
+Step 0: Prepare
+Give Docker enough memory. Seven Java services, MySQL and Kafka need about 6 GB, so allow 8 GB. In Docker Desktop, open Settings, then Resources. With WSL2, set memory=8GB under [wsl2] in C:\Users\<you>\.wslconfig, then run wsl --shutdown and reopen Docker Desktop.
+Stop everything that’s running now: all services in IntelliJ, the gateway, and the old Kafka (cd C:\lottery-infra, then docker compose down). Otherwise port 8080 is taken.
+Folders and OneDrive. Your code is under OneDrive\Desktop\LMS. Docker can only read files that are really on disk, so right-click the LMS folder and choose Always keep on this device. Check the folder names of your seven projects. I assume auth-service, lottery-service, ticket-service, draw-service, winner-service, audit-service and api-gateway, all directly inside LMS. If the gateway lives elsewhere, move it there or change its path in the compose file.
+Java version. Open one service’s pom.xml and read <java.version> (I’ll assume 25).
+Step 1: Dockerfile (the same file in all seven service folders)
+dockerfile
+ARG JAVA_VERSION=25
+
+# Stage 1: build the jar
+FROM maven:3.9-eclipse-temurin-${JAVA_VERSION} AS build
+WORKDIR /build
+COPY pom.xml .
+RUN mvn -B -q dependency:go-offline
+COPY src ./src
+RUN mvn -B -q -DskipTests package
+
+# Stage 2: a small runtime image that runs as a normal user, not root
+FROM eclipse-temurin:${JAVA_VERSION}-jre
+WORKDIR /app
+RUN useradd --system --uid 10001 --no-create-home appuser
+COPY --from=build /build/target/*.jar app.jar
+USER appuser
+ENTRYPOINT ["java", "-XX:MaxRAMPercentage=70", "-jar", "/app/app.jar"]
+
+Save it as Dockerfile (no extension) in each folder. Add a .dockerignore file in each folder as well, so your IDE files and old builds aren’t sent to Docker:
+
+target/
+.idea/
+*.iml
+.git/
+Step 2: Database scripts (folder LMS\deploy\db\init)
+
+The services run with ddl-auto=validate, so the tables must exist before they start. A fresh database is empty, so we create the structure from your current one.
+
+10-schema.sql: in MySQL Workbench open Server, then Data Export. Tick the six schemas (lottery_auth_db, lottery_db, lottery_ticket_db, lottery_draw_db, lottery_winner_db, lottery_audit_db). Choose Dump Structure Only, Export to Self-Contained File, and tick Include Create Schema. Save it as 10-schema.sql in that folder. Your test data, users and password hashes stay out of it.
+
+20-roles.sql: the four roles are the only data the system needs to start:
+
+sql
+USE lottery_auth_db;
+INSERT INTO roles (name, description) VALUES
+  ('ADMIN', 'System administrator'),
+  ('AGENT', 'Lottery ticket agent'),
+  ('CUSTOMER', 'Lottery customer'),
+  ('AUDITOR', 'Read-only auditor');
+
+99-grants.sql: the services don’t use the root account. They get one user that can only read and write rows, with no right to change tables:
+
+sql
+GRANT SELECT, INSERT, UPDATE, DELETE ON lottery_auth_db.*   TO 'lottery_app'@'%';
+GRANT SELECT, INSERT, UPDATE, DELETE ON lottery_db.*        TO 'lottery_app'@'%';
+GRANT SELECT, INSERT, UPDATE, DELETE ON lottery_ticket_db.* TO 'lottery_app'@'%';
+GRANT SELECT, INSERT, UPDATE, DELETE ON lottery_draw_db.*   TO 'lottery_app'@'%';
+GRANT SELECT, INSERT, UPDATE, DELETE ON lottery_winner_db.* TO 'lottery_app'@'%';
+GRANT SELECT, INSERT, UPDATE, DELETE ON lottery_audit_db.*  TO 'lottery_app'@'%';
+
+These scripts run once, the first time the database container starts with an empty volume.
+
+Step 3: The secrets file LMS\.env
+
+Create .env next to the compose file:
+
+JAVA_VERSION=25
+MYSQL_VERSION=9.7
+MYSQL_ROOT_PASSWORD=
+APP_DB_PASSWORD=
+JWT_SECRET=
+AUDIT_INTERNAL_KEY=
+RAZORPAY_KEY_ID=
+RAZORPAY_KEY_SECRET=
+RAZORPAY_WEBHOOK_SECRET=
+
+Fill each value. Generate the random ones in PowerShell, one command per value:
+
+powershell
+# a password (use for MYSQL_ROOT_PASSWORD and APP_DB_PASSWORD)
+$b = New-Object byte[] 24; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b); -join ($b | ForEach-Object { $_.ToString('x2') })
+
+# the JWT secret and the audit key (must be valid base64)
+$b = New-Object byte[] 48; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b); [Convert]::ToBase64String($b)
+
+Take the Razorpay values from your test-mode dashboard. Use a new JWT secret: everyone just signs in again. Add these lines to your .gitignore so secrets never reach GitHub:
+
+.env
+
+For MYSQL_VERSION, run SELECT VERSION(); in Workbench and use the same major version. If Docker can’t find the tag, use 8.4.
+
+Step 4: LMS\docker-compose.yml
+yaml
+name: lottery
+
+# Settings shared by the six Spring services
+x-java-service: &java-service
+  restart: unless-stopped
+  mem_limit: 512m
+  depends_on:
+    mysql:
+      condition: service_healthy
+    kafka-init:
+      condition: service_completed_successfully
+
+x-common-env: &common-env
+  SPRING_DATASOURCE_USERNAME: lottery_app
+  SPRING_DATASOURCE_PASSWORD: ${APP_DB_PASSWORD}
+  SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+  JWT_SECRET: ${JWT_SECRET}
+  # quieter and safer than the development settings
+  SPRING_JPA_SHOW_SQL: "false"
+  LOGGING_LEVEL_ORG_SPRINGFRAMEWORK_SECURITY: INFO
+  SPRINGDOC_API_DOCS_ENABLED: "false"
+  SPRINGDOC_SWAGGER_UI_ENABLED: "false"
+
+services:
+  mysql:
+    image: mysql:${MYSQL_VERSION:-9.7}
+    restart: unless-stopped
+    mem_limit: 768m
+    command: --default-time-zone=+00:00 --character-set-server=utf8mb4 --collation-server=utf8mb4_0900_ai_ci
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_USER: lottery_app
+      MYSQL_PASSWORD: ${APP_DB_PASSWORD}
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./deploy/db/init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "127.0.0.1:3307:3306"      # for Workbench on this PC only
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 40s
+
+  kafka:
+    image: apache/kafka:4.0.0
+    restart: unless-stopped
+    mem_limit: 1536m
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: INTERNAL://:19092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:19092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:19092 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 30s
+
+  # Creates the two topics once, then exits
+  kafka-init:
+    image: apache/kafka:4.0.0
+    restart: "no"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    command: >
+      sh -c "/opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 --create --if-not-exists --topic audit-events --partitions 3 --replication-factor 1 &&
+             /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 --create --if-not-exists --topic audit-events.DLT --partitions 1 --replication-factor 1"
+
+  auth-service:
+    <<: *java-service
+    build:
+      context: ./auth-service
+      args:
+        JAVA_VERSION: ${JAVA_VERSION:-25}
+    environment:
+      <<: *common-env
+      SERVER_PORT: 8081
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/lottery_auth_db
+
+  lottery-service:
+    <<: *java-service
+    build:
+      context: ./lottery-service
+      args:
+        JAVA_VERSION: ${JAVA_VERSION:-25}
+    environment:
+      <<: *common-env
+      SERVER_PORT: 8082
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/lottery_db
+      DRAW_SERVICE_BASE_URL: http://draw-service:8084
+
+  ticket-service:
+    <<: *java-service
+    build:
+      context: ./ticket-service
+      args:
+        JAVA_VERSION: ${JAVA_VERSION:-25}
+    environment:
+      <<: *common-env
+      SERVER_PORT: 8083
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/lottery_ticket_db
+      LOTTERY_SERVICE_BASE_URL: http://lottery-service:8082
+      DRAW_SERVICE_BASE_URL: http://draw-service:8084
+      RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID}
+      RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET}
+      RAZORPAY_WEBHOOK_SECRET: ${RAZORPAY_WEBHOOK_SECRET}
+
+  draw-service:
+    <<: *java-service
+    build:
+      context: ./draw-service
+      args:
+        JAVA_VERSION: ${JAVA_VERSION:-25}
+    environment:
+      <<: *common-env
+      SERVER_PORT: 8084
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/lottery_draw_db
+      LOTTERY_SERVICE_BASE_URL: http://lottery-service:8082
+
+  winner-service:
+    <<: *java-service
+    build:
+      context: ./winner-service
+      args:
+        JAVA_VERSION: ${JAVA_VERSION:-25}
+    environment:
+      <<: *common-env
+      SERVER_PORT: 8085
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/lottery_winner_db
+      LOTTERY_SERVICE_BASE_URL: http://lottery-service:8082
+      DRAW_SERVICE_BASE_URL: http://draw-service:8084
+      TICKET_SERVICE_BASE_URL: http://ticket-service:8083
+
+  audit-service:
+    <<: *java-service
+    build:
+      context: ./audit-service
+      args:
+        JAVA_VERSION: ${JAVA_VERSION:-25}
+    environment:
+      <<: *common-env
+      SERVER_PORT: 8086
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/lottery_audit_db
+      AUDIT_INTERNAL_KEY: ${AUDIT_INTERNAL_KEY}
+
+  api-gateway:
+    restart: unless-stopped
+    mem_limit: 512m
+    build:
+      context: ./api-gateway
+      args:
+        JAVA_VERSION: ${JAVA_VERSION:-25}
+    depends_on:
+      - auth-service
+      - lottery-service
+      - ticket-service
+      - draw-service
+      - winner-service
+      - audit-service
+    environment:
+      SERVER_PORT: 8080
+      AUTH_SERVICE_URL: http://auth-service:8081
+      LOTTERY_SERVICE_URL: http://lottery-service:8082
+      TICKET_SERVICE_URL: http://ticket-service:8083
+      DRAW_SERVICE_URL: http://draw-service:8084
+      WINNER_SERVICE_URL: http://winner-service:8085
+      AUDIT_SERVICE_URL: http://audit-service:8086
+    ports:
+      - "8080:8080"
+
+volumes:
+  mysql-data:
+  kafka-data:
+
+Your existing application.properties files stay as they are for IntelliJ. The environment variables here override them only inside Docker. If a service has a setting I haven’t listed (another *.base-url or a custom key), it will fail on startup with a clear message naming it.
+
+Step 5: Build and start
+
+From C:\Users\nigam\OneDrive\Desktop\LMS in PowerShell:
+
+docker compose build
+docker compose up -d
+docker compose ps
+
+The first build takes several minutes, because each service downloads its Maven dependencies. After that, only changed layers rebuild. In ps, mysql and kafka should become healthy, kafka-init should show Exited (0) (that’s correct), and everything else Up. Follow a service’s log with docker compose logs -f lottery-service.
+
+Step 6: Create the first admin
+
+The database is empty, so no users exist. Register one through the gateway:
+
+powershell
+Invoke-RestMethod -Method Post -Uri http://localhost:8080/api/auth/register -ContentType 'application/json' -Body '{"username":"admin","email":"admin@example.com","password":"CHOOSE-A-STRONG-PASSWORD"}'
+
+Registration gives CUSTOMER. Add the admin role directly in the database (it prompts for your MYSQL_ROOT_PASSWORD):
+
+docker compose exec mysql mysql -uroot -p lottery_auth_db -e "INSERT INTO user_roles (user_id, role_id) SELECT u.id, r.id FROM users u, roles r WHERE u.username='admin' AND r.name='ADMIN';"
+
+Then sign in again to get a token that includes the new role.
+
+Step 7: Test
+#	Check	Expected
+1	docker compose ps	mysql and kafka healthy, kafka-init exited (0), all else running
+2	docker compose exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:19092 --list	audit-events and audit-events.DLT
+3	POST http://localhost:8080/api/auth/login as admin	A token whose roles include ADMIN
+4	Create a lottery through Postman or the frontend (still on Vite for now), header X-Correlation-Id: docker-0001	201
+5	GET /api/audit/events?correlationId=docker-0001 (admin token) after a few seconds	The LOTTERY_CREATED event arrived through Kafka
+6	docker compose restart kafka, make another change, wait a minute	Its event appears (it waited in the outbox)
+7	docker compose down, then docker compose up -d (without -v)	You can still sign in, and the lottery exists. Data lives in volumes
+8	Open http://localhost:8082 or http://localhost:3306 from the host	Not reachable (only the gateway is public)
+
+docker compose down -v deletes the volumes, meaning all data. Don’t use -v unless you want a clean slate. Back up with docker compose exec mysql mysqldump -uroot -p --databases lottery_db ... > backup.sql before experiments.
+
+If something fails
+What you see	Likely cause
+docker compose build says the Maven or JRE tag isn’t found	The Java version in .env doesn’t match an existing tag. Send me the exact message
+A service restarts in a loop	docker compose logs <service> shows why. A common one is Access denied (the password in .env differs from what MySQL was created with: remove the volume with docker compose down -v, then start again)
+Schema-validation: missing table	The 10-schema.sql export is missing a schema, or MySQL started before the files were in place. Run docker compose down -v, check the files, and start again
+Public Key Retrieval is not allowed	Add ?allowPublicKeyRetrieval=true to that service’s SPRING_DATASOURCE_URL
+A service exits with Could not resolve placeholder ...	A setting I didn’t list. The name is in the message
+Gateway returns 503 for a route	That service isn’t up yet or crashed. Read its logs
+port is already allocated	Something still uses 8080 (an IntelliJ run or the old stack)
+What to send me
+
+Reply with the output of docker compose ps after Step 5, and the first row of the test table that doesn’t match, with the last 30 lines of the relevant service’s logs (docker compose logs --tail 30 <service>). Never paste your .env file. When this passes, stage 2 adds the frontend (a small web server container), one public address with HTTPS, and putting the stack on a server.
